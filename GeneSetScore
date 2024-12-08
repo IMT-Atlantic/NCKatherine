@@ -1,0 +1,226 @@
+setwd("D:/Rproject/scRNA/NCKatherine")
+
+library(dplyr)
+library(patchwork)
+library(Seurat)
+library(Matrix)
+library(data.table)
+library(future.apply)
+library(ggplot2)
+
+plan(multisession, workers = 30)
+
+barcode.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889920M0/barcodes.tsv.gz"
+genes.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889920M0/features.tsv.gz" 
+matrix.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889920M0/matrix.mtx.gz"
+M0 <- Read10X(data.dir = "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889920M0")
+
+barcode.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889921M1/barcodes.tsv.gz"
+genes.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889921M1/features.tsv.gz" 
+matrix.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889921M1/matrix.mtx.gz"
+M1 <- Read10X(data.dir = "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889921M1")
+
+barcode.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889922M2/barcodes.tsv.gz"
+genes.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889922M2/features.tsv.gz" 
+matrix.path <- "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889922M2/matrix.mtx.gz"
+M2 <- Read10X(data.dir = "E:/BioBank/scRNA/GSE161125M012scRNA/GSM4889922M2")
+
+M0 <- CreateSeuratObject(counts = M0, project = "M0", min.cells = 3, min.features = 200)
+M1 <- CreateSeuratObject(counts = M1, project = "M1", min.cells = 3, min.features = 200)
+M2 <- CreateSeuratObject(counts = M2, project = "M2", min.cells = 3, min.features = 200)
+
+# QC Function
+qc_function <- function(Data, output_dir, data_name) {
+  mt.genes <- grep(pattern = "^MT-", x = rownames(Data), value = T)
+  Data[['percent.mt']] <- PercentageFeatureSet(object = Data, pattern = "^MT-")
+  Data <- PercentageFeatureSet(object = Data, pattern = "^MT-", col.name = "percent.mt")
+  Data <- PercentageFeatureSet(object = Data, features = mt.genes, col.name = "percent.mt")
+  plot1 <- VlnPlot(Data, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+  ggsave(paste0(output_dir, "/", data_name, "_vlnplot_nFeature_nCount_percent_mt.png"), plot1, width = 10, height = 5, dpi = 800)
+  Data <- subset(Data, subset = nFeature_RNA > 1 & nFeature_RNA < 10000 &
+                   nCount_RNA < 50000 & percent.mt < 50)
+  plot2 <- FeatureScatter(Data, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+  plot3 <- FeatureScatter(Data, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+  ggsave(paste0(output_dir, "/", data_name, "_scatter_nCount_percent_mt.png"), plot2, width = 10, height = 5, dpi = 800)
+  ggsave(paste0(output_dir, "/", data_name, "_scatter_nCount_nFeature.png"), plot3, width = 10, height = 5, dpi = 800)
+  return(Data)
+}
+output_dir <- 'D:/Rproject/scRNA/NCKatherine/QCResult'
+M0 <- qc_function(M0, output_dir, "M0")
+M1 <- qc_function(M1, output_dir, "M1")
+M2 <- qc_function(M2, output_dir, "M2")
+
+# Combine data sans eliminer batch
+Data <- merge(M0, y = c(M1, M2), add.cell.ids = c("M0", "M1", "M2"))
+
+# ——————————————————————————————————————————————————————————————————————————————高变基因的寻找
+options(future.globals.maxSize = 1000 * 1024^3)
+Data <- NormalizeData(object = Data, normalization.method = "LogNormalize", scale.factor = 10000)
+Data <- FindVariableFeatures(object = Data, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(Data), 10)
+plot3 <- VariableFeaturePlot(Data)
+plot3
+plot4 <- LabelPoints(plot=plot3, points = top10,repel=TRUE)
+plot4
+
+# ——————————————————————————————————————————————————————————————————————————————降维分析
+all.genes <- rownames(Data) 
+Data <- ScaleData(Data, features = all.genes) 
+Data <- RunPCA(object = Data, features = VariableFeatures(Data), verbose = F)
+DimPlot(Data, reduction = "pca")
+print(Data[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(Data, dims = 1:2, reduction = "pca") 
+DimPlot(Data, reduction = "pca") 
+DimHeatmap(Data, dims = 1, cells = 500, balanced = TRUE) 
+Data <- JackStraw(Data, num.replicate = 100, dims = 50)
+Data <- ScoreJackStraw(Data, dims = 1:20)
+JackStrawPlot(Data, dims = 1:15)
+ElbowPlot(Data)
+saveRDS(Data, file = 'E:/BioBank/scRNA/GSE161125M012scRNA/DataM012.rds')
+
+# ——————————————————————————————————————————————————————————————————————————————提取固定主成分用于聚类
+Data <- FindNeighbors(object = Data, reduction = "pca", dims = 1:16)
+Data <- FindClusters(object = Data, resolution = 1)
+Data <- RunUMAP(object = Data, dims = 1:16)
+
+# ——————————————————————————————————————————————————————————————————————————————可视化分群
+head(Idents(Data), 5)
+DimPlot(Data, reduction = "umap", group.by = 'orig.ident', label=TRUE)
+
+
+# ——————————————————————————————————————————————————————————————————————————————基因集评分
+# 乳酸化基因集
+genes_of_interest <- c("Sirt1", "Sirt2", "Cbp", "Gcn5", "Hdac3", "Hdac2", "Hdac1", "P300", "Sirt3", 'Alkbh4')
+Data <- AddModuleScore(
+  object = Data, 
+  features = list(genes_of_interest),  # 将基因列表作为一个元素传递
+  name = "Lactate",
+  assay = 'RNA',
+  slot = 'scale.data'
+)
+LactateScore <- VlnPlot(Data, features = "Lactate1", group.by = 'orig.ident')
+LactateAllGene <- VlnPlot(Data, features = genes_of_interest, group.by = 'orig.ident', pt.size = 0)
+ggsave(filename = 'LactateScore.png', plot = LactateScore, width = 8, height = 10, dpi = 800)
+ggsave(filename = 'LactateAllGene.png', plot = LactateAllGene, width = 20, height = 10, dpi = 800)
+
+# 甲基化基因集
+genes_of_interest <- c('Kmt6a', 'Kdm6a', 'Mina', 'Kmt3e', 'Setd3', 'Kdm3c', 'Jarid2', 'Kmt5b',
+                       'Kdm1a', 'Kdm5d', 'Kdm7a', 'Kmt2g', 'Kmt3c', 'Dmt6b', 'Kdm6b', 'Kdm5b', 
+                       'Kdm3a', 'Kdm7c', 'Kmt1a')
+Data <- AddModuleScore(
+  object = Data, 
+  features = list(genes_of_interest),  # 将基因列表作为一个元素传递
+  name = "Lactate",
+  assay = 'RNA',
+  slot = 'scale.data'
+)
+MethyScore <- VlnPlot(Data, features = "Lactate1", group.by = 'orig.ident')
+MethyAllGene <- VlnPlot(Data, features = genes_of_interest, group.by = 'orig.ident', pt.size = 0)
+ggsave(filename = 'MethyScore.png', plot = MethyScore, width = 8, height = 10, dpi = 800)
+ggsave(filename = 'MethyAllGene.png', plot = MethyAllGene, width = 20, height = 10, dpi = 800)
+
+# 乙酰化基因集
+genes_of_interest <- c('Hdac6', 'Kat5', 'Kat13a', 'Sirt7', 'Hdac5', 'Kat13b', 'Kat1',
+                       'Hdac9', 'Kat13d', 'Sirt1', 'Sirt2', 'Hdac3', 'Kat13c', 'Kat8',
+                       'Kat2b', 'Hdac1', 'Kat4', 'Hdac4')
+Data <- AddModuleScore(
+  object = Data, 
+  features = list(genes_of_interest),  # 将基因列表作为一个元素传递
+  name = "Lactate",
+  assay = 'RNA',
+  slot = 'scale.data'
+)
+AcetylScore <- VlnPlot(Data, features = "Lactate1", group.by = 'orig.ident')
+AcetylAllGene <- VlnPlot(Data, features = genes_of_interest, group.by = 'orig.ident', pt.size = 0)
+ggsave(filename = 'AcetylScore.png', plot = AcetylScore, width = 8, height = 10, dpi = 800)
+ggsave(filename = 'AcetylAllGene.png', plot = AcetylAllGene, width = 20, height = 10, dpi = 800)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ——————————————————————————————————————————————————————————————————————————————细胞轨迹查找
+## 搭建cds分析对象
+data <- as(as.matrix(Data@assays$RNA@features), 'sparseMatrix') 
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+data <- as(as.matrix(Data@assays$RNA@layers$counts), 'sparseMatrix') 
+pd <-  Data@meta.data
+cds <- new_cell_data_set(data,
+                         cell_metadata  = pd,
+                         gene_metadata  = fData)
+
+cds <- preprocess_cds(cds, num_dim = 10)
+plot_pc_variance_explained(cds)
+cds <- reduce_dimension(cds)
+plot_cells(cds)
+colnames(colData(cds))
+
+cds.embed<- cds@int_colData$reducedDims$UMAP
+int.embed <- Embeddings(Data, reduction = "umap")
+int.embed <- int.embed[rownames(cds.embed),]
+cds@int_colData$reducedDims$UMAP <- int.embed
+
+cds <- cluster_cells(cds)
+cds <- learn_graph(cds)
+p = plot_cells(cds, label_groups_by_cluster = FALSE, label_leaves = FALSE, 
+               label_branch_points = FALSE, color_cells_by="seurat_clusters")
+p
+
+#可视化修饰
+p5 <- plot_cells(cds,
+                 color_cells_by = "seurat_clusters",
+                 label_groups_by_cluster=FALSE,
+                 label_branch_points=TRUE,
+                 group_label_size=4)
+p5
+
+# 交互式分析
+cds <- order_cells(cds)
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5)
+
+
+
+
+# 6658细胞用5分钟，内存占用20G
+subset_pr_test_res <- graph_test(cds, neighbor_graph="principal_graph", cores=4)
+# 里面morans_I数值越靠近1代表这个基因在空间距离相近的细胞中表达值越相似，0则代表没有空间共表达效应
+subset_pr_test_res
+
+# 绘制表达量变化
+top10 <- subset_pr_test_res %>% top_n(n=10, morans_I) %>%
+  pull(gene_short_name) %>% as.character()
+p <- plot_genes_in_pseudotime(cds[top10,], color_cells_by="seurat_clusters", 
+                              min_expr=0.5, ncol = 2)
+plot_cells(cds, genes=top10, show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,  label_leaves=FALSE)
+
+#把我们细胞轨迹分析的结果返回Seurat对象中
+pseudotime <- pseudotime(cds, reduction_method = 'UMAP')
+pseudotime <- pseudotime[rownames(Data@meta.data)]
+Data$pseudotime <- pseudotime
+saveRDS(Data, file = "GSE158761.rds")
+
